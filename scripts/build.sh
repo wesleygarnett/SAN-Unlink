@@ -17,7 +17,9 @@ DIST="dist"
 IDENTITY="${CODE_SIGN_IDENTITY:--}"   # default: ad-hoc "-"
 
 echo "==> Cleaning previous product"
-rm -rf "$DIST"
+# Also clear the derived-data folder: reusing it after package.sh re-signs the app
+# triggers a spurious "Entitlements file was modified during the build" error.
+rm -rf "$DIST" "$DERIVED"
 mkdir -p "$DIST"
 
 echo "==> Building universal Release (identity: $IDENTITY)"
