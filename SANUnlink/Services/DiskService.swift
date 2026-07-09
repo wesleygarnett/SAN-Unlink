@@ -23,8 +23,11 @@ enum DiskService {
 
     static let diskutilPath = "/usr/sbin/diskutil"
 
-    /// The `BusProtocol` value that identifies a Fibre Channel attachment.
-    static let fibreChannelProtocol = "Fibre Channel"
+    /// `diskutil` reports Fibre Channel as either "Fibre Channel" or
+    /// "Fibre Channel Interface" (e.g. Xsan / SANlink), so we match by prefix.
+    static func isFibreChannelProtocol(_ value: String?) -> Bool {
+        value?.hasPrefix("Fibre Channel") ?? false
+    }
 
     // MARK: - Command execution
 
@@ -68,7 +71,16 @@ enum DiskService {
 
     // MARK: - Enumeration
 
+    /// Content types that are not user-facing volumes and must never be surfaced
+    /// or unmounted individually: the raw Fibre Channel LUNs that back an Xsan volume.
+    private static let excludedWholeDiskContent: Set<String> = ["Apple_Xsan_Component"]
+
     /// Returns every Fibre Channel disk currently attached, with its mountable volumes.
+    ///
+    /// Performance matters here: a SAN can expose dozens of FC LUNs, and this runs on
+    /// every Disk Arbitration event. Each disk's `diskutil info` is fetched at most once
+    /// (memoised in `infoCache`), non-volume Xsan component LUNs are skipped before any
+    /// per-volume work, and whole-disk volumes reuse the info already fetched.
     static func enumerateFCDisks() -> [FCDisk] {
         let listResult = runDiskutil(["list", "-plist"])
         guard listResult.succeeded,
@@ -76,61 +88,73 @@ enum DiskService {
               let entries = root["AllDisksAndPartitions"] as? [[String: Any]]
         else { return [] }
 
+        var infoCache: [String: [String: Any]] = [:]
+        func info(_ id: String) -> [String: Any]? {
+            if let cached = infoCache[id] { return cached }
+            guard let fetched = infoPlist(for: id) else { return nil }
+            infoCache[id] = fetched
+            return fetched
+        }
+
         var disks: [FCDisk] = []
 
         for entry in entries {
-            guard let wholeID = entry["DeviceIdentifier"] as? String else { continue }
-            guard isFibreChannel(entry: entry, wholeID: wholeID) else { continue }
+            guard let wholeID = entry["DeviceIdentifier"] as? String,
+                  let wholeInfo = info(wholeID) else { continue }
 
-            let volumeIDs = volumeIdentifiers(in: entry)
-            let volumes = volumeIDs.compactMap { makeVolume(id: $0, wholeDiskID: wholeID) }
+            guard isFibreChannel(entry: entry, wholeInfo: wholeInfo, info: info) else { continue }
 
-            // Only surface disks that actually expose mountable volumes.
+            // Skip raw Xsan component LUNs early — before any per-volume work.
+            let content = wholeInfo["Content"] as? String ?? ""
+            if excludedWholeDiskContent.contains(content) { continue }
+
+            let volumeIDs = volumeIdentifiers(entry: entry, wholeID: wholeID, wholeInfo: wholeInfo)
+            let volumes = volumeIDs.compactMap { id -> FCVolume? in
+                makeVolume(id: id, wholeDiskID: wholeID, info: info(id))
+            }
             guard !volumes.isEmpty else { continue }
 
-            let info = infoPlist(for: wholeID)
-            let mediaName = (info?["MediaName"] as? String)?.trimmingCharacters(in: .whitespaces)
-            let size = (info?["TotalSize"] as? NSNumber)?.int64Value ?? 0
+            let mediaName = (wholeInfo["MediaName"] as? String)?.trimmingCharacters(in: .whitespaces)
+            let size = (wholeInfo["TotalSize"] as? NSNumber)?.int64Value ?? 0
+            let ejectable = (wholeInfo["Ejectable"] as? NSNumber)?.boolValue ?? true
 
             disks.append(FCDisk(id: wholeID,
                                 mediaName: (mediaName?.isEmpty == false ? mediaName! : wholeID),
                                 sizeBytes: size,
+                                isEjectable: ejectable,
                                 volumes: volumes))
         }
 
         return disks.sorted { $0.id < $1.id }
     }
 
-    /// Convenience: all FC volumes flattened across disks.
-    static func enumerateFCVolumes() -> [FCVolume] {
-        enumerateFCDisks().flatMap(\.volumes)
-    }
-
     /// Determines whether a `diskutil list` entry is backed by a Fibre Channel device.
     /// Handles APFS containers by resolving their physical store's protocol.
-    private static func isFibreChannel(entry: [String: Any], wholeID: String) -> Bool {
-        if busProtocol(of: wholeID) == fibreChannelProtocol { return true }
+    private static func isFibreChannel(entry: [String: Any],
+                                       wholeInfo: [String: Any],
+                                       info: (String) -> [String: Any]?) -> Bool {
+        if isFibreChannelProtocol(wholeInfo["BusProtocol"] as? String) { return true }
 
         // APFS synthesized containers report their own (virtual) protocol, so follow
         // the physical store down to the backing hardware.
         if let stores = entry["APFSPhysicalStores"] as? [[String: Any]] {
             for store in stores {
-                if let storeID = store["DeviceIdentifier"] as? String {
-                    let storeWhole = wholeDisk(of: storeID)
-                    if busProtocol(of: storeWhole) == fibreChannelProtocol { return true }
+                if let storeID = store["DeviceIdentifier"] as? String,
+                   let storeInfo = info(wholeDisk(of: storeID, info: info)),
+                   isFibreChannelProtocol(storeInfo["BusProtocol"] as? String) {
+                    return true
                 }
             }
         }
         return false
     }
 
-    private static func busProtocol(of device: String) -> String? {
-        infoPlist(for: device)?["BusProtocol"] as? String
-    }
-
     /// Collects the mountable volume identifiers within a `diskutil list` entry,
-    /// covering both classic partitions and APFS volumes.
-    private static func volumeIdentifiers(in entry: [String: Any]) -> [String] {
+    /// covering classic partitions, APFS volumes, and whole-disk filesystems
+    /// (e.g. an Xsan volume, which is itself the whole disk with no partition map).
+    private static func volumeIdentifiers(entry: [String: Any],
+                                          wholeID: String,
+                                          wholeInfo: [String: Any]) -> [String] {
         var ids: [String] = []
         if let partitions = entry["Partitions"] as? [[String: Any]] {
             for part in partitions {
@@ -147,11 +171,23 @@ enum DiskService {
                 if let id = vol["DeviceIdentifier"] as? String { ids.append(id) }
             }
         }
+
+        // Whole-disk volume fallback: no partitions/APFS volumes, but the disk itself
+        // carries a filesystem (Xsan, or an FC drive formatted without a partition map).
+        // Reuses the already-fetched whole-disk info — no extra diskutil call.
+        if ids.isEmpty {
+            let hasFilesystem = (wholeInfo["FilesystemType"] as? String)?.isEmpty == false
+            let hasMountPoint = (wholeInfo["MountPoint"] as? String)?.isEmpty == false
+            let hasVolumeName = (wholeInfo["VolumeName"] as? String)?.isEmpty == false
+            if hasFilesystem || hasMountPoint || hasVolumeName {
+                ids.append(wholeID)
+            }
+        }
         return ids
     }
 
-    private static func makeVolume(id: String, wholeDiskID: String) -> FCVolume? {
-        guard let info = infoPlist(for: id) else { return nil }
+    private static func makeVolume(id: String, wholeDiskID: String, info: [String: Any]?) -> FCVolume? {
+        guard let info else { return nil }
         let mountPoint = (info["MountPoint"] as? String).flatMap { $0.isEmpty ? nil : $0 }
         let volumeName = (info["VolumeName"] as? String).flatMap { $0.isEmpty ? nil : $0 }
         let size = (info["TotalSize"] as? NSNumber)?.int64Value ?? 0
@@ -164,9 +200,8 @@ enum DiskService {
 
     /// Resolves a partition/volume identifier to its whole-disk identifier
     /// (e.g. "disk4s2" -> "disk4").
-    private static func wholeDisk(of device: String) -> String {
-        if let info = infoPlist(for: device),
-           let parent = info["ParentWholeDisk"] as? String, !parent.isEmpty {
+    private static func wholeDisk(of device: String, info: (String) -> [String: Any]?) -> String {
+        if let parent = info(device)?["ParentWholeDisk"] as? String, !parent.isEmpty {
             return parent
         }
         // Fallback: strip the partition suffix.
@@ -192,14 +227,17 @@ enum DiskService {
         try check(result, action: "unmount \(volume.name)")
     }
 
-    /// Ejects a whole disk after unmounting all of its volumes — this is what makes
-    /// the device safe to physically disconnect. Retries with `force`.
+    /// Makes a disk safe to disconnect: unmounts all of its volumes, then physically
+    /// ejects it when the hardware supports ejection. Xsan volumes are not ejectable,
+    /// so for them unmounting is the complete and correct safe-disconnect action.
     static func eject(_ disk: FCDisk) throws {
         var result = runDiskutil(["unmountDisk", disk.id])
         if !result.succeeded {
             result = runDiskutil(["unmountDisk", "force", disk.id])
         }
         try check(result, action: "unmount \(disk.mediaName)")
+
+        guard disk.isEjectable else { return }
 
         let ejectResult = runDiskutil(["eject", disk.id])
         try check(ejectResult, action: "eject \(disk.mediaName)")

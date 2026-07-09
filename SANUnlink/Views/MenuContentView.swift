@@ -10,7 +10,7 @@ struct MenuContentView: View {
 
             Divider()
 
-            if store.disks.isEmpty {
+            if store.disks.isEmpty && !store.isBusy {
                 emptyState
             } else {
                 driveList
@@ -24,7 +24,7 @@ struct MenuContentView: View {
             Divider()
             footer
         }
-        .frame(width: 320)
+        .frame(width: 340)
     }
 
     // MARK: - Header
@@ -67,17 +67,33 @@ struct MenuContentView: View {
                 diskSection(disk)
             }
 
+            bulkActionButton
+                .controlSize(.large)
+                .buttonStyle(.borderedProminent)
+                .disabled(store.isBusy)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+        }
+    }
+
+    /// "Unmount All" when anything is mounted (the safe-disconnect action), otherwise
+    /// "Mount All" to bring every volume back.
+    @ViewBuilder
+    private var bulkActionButton: some View {
+        if store.hasMountedVolumes {
             Button {
                 store.ejectAll()
             } label: {
-                Label("Eject All (safe to disconnect)", systemImage: "eject.fill")
+                Label("Unmount All (safe to disconnect)", systemImage: "eject.fill")
                     .frame(maxWidth: .infinity)
             }
-            .controlSize(.large)
-            .buttonStyle(.borderedProminent)
-            .disabled(store.isBusy)
-            .padding(.horizontal, 14)
-            .padding(.vertical, 10)
+        } else {
+            Button {
+                store.mountAll()
+            } label: {
+                Label("Mount All Drives", systemImage: "externaldrive.badge.plus")
+                    .frame(maxWidth: .infinity)
+            }
         }
     }
 
@@ -96,26 +112,59 @@ struct MenuContentView: View {
     }
 
     private func volumeRow(_ volume: FCVolume) -> some View {
-        HStack(spacing: 10) {
+        let op = store.operation(for: volume.id)
+        return HStack(spacing: 10) {
             Image(systemName: volume.isMounted ? "internaldrive.fill" : "internaldrive")
                 .foregroundStyle(volume.isMounted ? Color.accentColor : .secondary)
             VStack(alignment: .leading, spacing: 1) {
                 Text(volume.name)
                     .font(.body)
-                Text(subtitle(for: volume))
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
+                statusLine(for: volume, op: op)
             }
             Spacer()
-            Toggle("", isOn: Binding(
-                get: { volume.isMounted },
-                set: { _ in store.toggle(volume) }))
-            .toggleStyle(.switch)
-            .labelsHidden()
-            .disabled(store.isBusy)
+            if let op {
+                progressIndicator(op)
+            } else {
+                Toggle("", isOn: Binding(
+                    get: { volume.isMounted },
+                    set: { _ in store.toggle(volume) }))
+                .toggleStyle(.switch)
+                .labelsHidden()
+                .disabled(store.isBusy)
+            }
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 5)
+    }
+
+    /// Subtitle: shows the live operation phase when active, otherwise mount state + size.
+    @ViewBuilder
+    private func statusLine(for volume: FCVolume, op: VolumeOperation?) -> some View {
+        if let op {
+            TimelineView(.periodic(from: .now, by: 1)) { context in
+                let secs = max(0, Int(context.date.timeIntervalSince(op.started)))
+                Text(hintText(for: op, seconds: secs))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        } else {
+            Text(subtitle(for: volume))
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private func progressIndicator(_ op: VolumeOperation) -> some View {
+        ProgressView().controlSize(.small)
+    }
+
+    private func hintText(for op: VolumeOperation, seconds: Int) -> String {
+        let base = "\(op.verb)… \(seconds)s"
+        // Xsan mounts can take up to a minute; reassure the user it isn't stuck.
+        if op.kind == .mounting && seconds >= 5 {
+            return "\(base) — Xsan mounts can take up to a minute"
+        }
+        return base
     }
 
     private func subtitle(for volume: FCVolume) -> String {

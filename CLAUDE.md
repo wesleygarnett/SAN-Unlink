@@ -45,35 +45,54 @@ Data flows: `diskutil` / Disk Arbitration → `DiskService` → `VolumeStore` �
 
 - **[SANUnlink/Services/DiskService.swift](SANUnlink/Services/DiskService.swift)** — the core.
   Stateless enum that shells out to `/usr/sbin/diskutil`. Enumerates disks via
-  `diskutil list -plist`, then filters to FC by reading `BusProtocol == "Fibre Channel"` from
-  `diskutil info -plist` (APFS containers are resolved through their physical store). Also
-  performs `mount` / `unmount` (with `force` retry) / `eject`. All methods are synchronous and
-  must be called off the main thread.
+  `diskutil list -plist`, then keeps those whose `BusProtocol` **begins with** `"Fibre Channel"`
+  (real SANlink/Xsan hardware reports `"Fibre Channel Interface"`, not `"Fibre Channel"` — match
+  by prefix, not equality). APFS containers are resolved through their physical store. Collects
+  mountable volumes from partitions, APFS volumes, **and whole-disk filesystems** — an Xsan
+  volume *is* the whole disk (`acfs`, no partition map). Raw `Apple_Xsan_Component` LUNs (the
+  bare FC devices backing an Xsan volume) are excluded. Performs `mount` / `unmount` (with
+  `force` retry) / `eject` (skipped for non-ejectable Xsan volumes — unmount is the complete
+  safe-disconnect action there). All methods are synchronous, must run off the main thread, and
+  memoise each disk's `diskutil info` per scan (a SAN can expose dozens of LUNs).
 - **[SANUnlink/Models/VolumeStore.swift](SANUnlink/Models/VolumeStore.swift)** — `@MainActor`
-  `ObservableObject` that is the single source of truth for the UI. Runs `DiskService` work on
-  a background queue, refreshes on Disk Arbitration events plus a 5s backup timer, and exposes
-  `toggle` / `eject` / `ejectAll` / `setLaunchAtLogin`.
+  `ObservableObject`, the single source of truth for the UI. Runs `DiskService` off a background
+  queue; refreshes on Disk Arbitration events plus a 5s backup timer. Exposes
+  `toggle` / `mountAll` / `ejectAll` / `setLaunchAtLogin`, and tracks in-flight
+  `operations` (per-volume mounting/unmounting) that drive the status UI. Two robustness
+  measures matter: **refreshes are coalesced** (only one enumeration at a time; event bursts
+  collapse into a single follow-up, so a mount's DA storm can't back up minutes of scans), and
+  **`applyRefresh` is flicker-resistant** (a transient empty result never blanks the list — it
+  re-checks after 3s — and a volume with an operation in flight is kept visible even if
+  `diskutil` momentarily drops it).
 - **[SANUnlink/Services/DiskArbitrationWatcher.swift](SANUnlink/Services/DiskArbitrationWatcher.swift)**
   — wraps Disk Arbitration C callbacks (appeared / disappeared / changed) on a dedicated
   background run-loop thread and calls back on the main queue for live updates.
 - **[SANUnlink/AppDelegate.swift](SANUnlink/AppDelegate.swift)** — the **shutdown/logout guard**.
-  `applicationShouldTerminate` returns `.terminateLater`, ejects all FC disks on a background
-  queue, then replies `true` — with a hard timeout so it can never hang shutdown itself. Also
-  observes `NSWorkspace.willPowerOffNotification`.
+  `applicationShouldTerminate` unmounts/ejects all FC volumes via `.terminateLater` + a hard
+  timeout, then replies. **Crucially it only fires for a genuine system logout / restart /
+  shutdown** — it inspects the terminating Apple Event's `kAEQuitReason`; a manual "Quit" returns
+  `.terminateNow` and never touches the (often production) mounted volumes. Also observes
+  `NSWorkspace.willPowerOffNotification`.
 - **[SANUnlink/Services/LoginItem.swift](SANUnlink/Services/LoginItem.swift)** — `SMAppService`
   wrapper for the "Launch at login" toggle (required so the guard is running at shutdown).
 - **[SANUnlink/Views/MenuContentView.swift](SANUnlink/Views/MenuContentView.swift)** — the
-  window-style popover: per-volume mount toggles, "Eject All", error row, launch-at-login, quit.
+  window-style popover: per-volume mount toggles with a **live status line** (`Mounting… 12s`,
+  spinner) while an operation runs, a context-aware bulk button (**Unmount All** when anything is
+  mounted, **Mount All** when nothing is), error row, launch-at-login, quit.
 
 ## Key constraints & gotchas
 
 - **Swift language mode is 5.0** (`SWIFT_VERSION = 5.0` in the pbxproj), deliberately, to keep
   the Disk Arbitration C-callback bridging and `@MainActor` plumbing simple. Raising to Swift 6
   strict concurrency would require reworking `DiskArbitrationWatcher` and `VolumeStore`.
-- **No privileged helper.** User-owned external FC volumes unmount/eject without root. If
-  force-unmount of a busy volume ever needs elevation, that's the point to add an `SMAppService`
-  daemon — it is intentionally not there yet.
-- **FC detection can only be fully verified with real SANlink hardware.** With none attached the
-  app correctly shows the empty state (the internal disk reports `BusProtocol = Apple Fabric`).
-  Before shipping, run the real-device pass: confirm only FC volumes appear (a USB drive plugged
-  in at the same time must **not** show up).
+- **No privileged helper — verified against a real Xsan SAN.** `diskutil` mount/unmount of the
+  Xsan volumes works as the logged-in user without root (even though `xsanctl` itself requires
+  superuser). So the app deliberately does **not** ship an `SMAppService` daemon or use `xsanctl`.
+  If some future force-unmount genuinely needs elevation, that daemon is the place to add it.
+- **Xsan mounts are inherently slow (~60s).** That latency is StorNext/`acfs`, not the app; the
+  UI surfaces it with the live per-volume status counter rather than trying to speed it up.
+- **Detection is verified against real SANlink/Xsan hardware** (Fibre Channel Interface, whole-disk
+  `acfs` volumes; the raw component LUNs are correctly hidden). With no FC hardware attached the
+  app shows the empty state (the internal disk reports `BusProtocol = Apple Fabric`). When
+  testing on non-Xsan FC drives, still confirm only FC volumes appear (a USB drive plugged in at
+  the same time must **not** show up).

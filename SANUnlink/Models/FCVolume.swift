@@ -27,6 +27,9 @@ struct FCDisk: Identifiable, Hashable {
     let mediaName: String
     /// Total media size in bytes.
     let sizeBytes: Int64
+    /// Whether the device can be physically ejected. Xsan volumes report `false`;
+    /// for them the safe-disconnect action is to unmount only.
+    let isEjectable: Bool
     /// Mountable volumes carried by this disk.
     var volumes: [FCVolume]
 
