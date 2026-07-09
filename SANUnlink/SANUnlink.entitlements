@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+	  Intentionally NOT sandboxed: the app shells out to /usr/sbin/diskutil and uses
+	  Disk Arbitration to mount/unmount/eject Fibre Channel volumes, which the App
+	  Sandbox would block. Ships with the hardened runtime for notarization.
+	-->
+	<key>com.apple.security.app-sandbox</key>
+	<false/>
+</dict>
+</plist>
