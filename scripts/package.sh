@@ -4,7 +4,7 @@
 #
 # Two modes, chosen automatically by whether notarization credentials are set:
 #
-#   1. Notarized (recommended for coworkers). Requires a Developer ID and a
+#   1. Notarized (recommended for sharing). Requires a Developer ID and a
 #      notarytool keychain profile:
 #        CODE_SIGN_IDENTITY="Developer ID Application: You (TEAMID)" \
 #        NOTARY_PROFILE="sanunlink-notary" \
@@ -14,7 +14,7 @@
 #           --apple-id you@example.com --team-id TEAMID --password APP_SPECIFIC_PW)
 #
 #   2. Ad-hoc (no Apple Developer account). Just run build.sh then package.sh;
-#      coworkers install with scripts/install.sh to clear the Gatekeeper quarantine.
+#      install with scripts/install.sh to clear the Gatekeeper quarantine.
 #
 set -euo pipefail
 
@@ -51,7 +51,7 @@ if [ -n "$NOTARY_PROFILE" ]; then
 	xcrun stapler staple "$APP"
 else
 	echo "==> Skipping notarization (NOTARY_PROFILE not set)."
-	echo "    Coworkers must install via scripts/install.sh to clear quarantine."
+	echo "    Install via scripts/install.sh to clear quarantine."
 fi
 
 echo "==> Packaged: $DMG"

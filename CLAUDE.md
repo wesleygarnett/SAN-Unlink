@@ -30,7 +30,7 @@ CODE_SIGN_IDENTITY="Developer ID Application: You (TEAMID)" ./scripts/build.sh
 # Package dist/SANUnlink.app into a DMG (add NOTARY_PROFILE to notarize — see script header)
 ./scripts/package.sh
 
-# Coworker install for the ad-hoc build (clears Gatekeeper quarantine)
+# Install the ad-hoc build (clears Gatekeeper quarantine, copies to /Applications)
 ./scripts/install.sh
 ```
 
@@ -53,7 +53,10 @@ Data flows: `diskutil` / Disk Arbitration → `DiskService` → `VolumeStore` �
   bare FC devices backing an Xsan volume) are excluded. Performs `mount` / `unmount` (with
   `force` retry) / `eject` (skipped for non-ejectable Xsan volumes — unmount is the complete
   safe-disconnect action there). All methods are synchronous, must run off the main thread, and
-  memoise each disk's `diskutil info` per scan (a SAN can expose dozens of LUNs).
+  memoise each disk's `diskutil info` per scan (a SAN can expose dozens of LUNs). **Every
+  `diskutil` call has a hard timeout** (`runDiskutil(_:timeout:)`, 60s default, 180s for
+  mount/unmount): on expiry the process is SIGTERM'd then SIGKILL'd, so a wedged `diskutil`
+  can never starve the serial work queue or the shutdown guard.
 - **[SANUnlink/Models/VolumeStore.swift](SANUnlink/Models/VolumeStore.swift)** — `@MainActor`
   `ObservableObject`, the single source of truth for the UI. Runs `DiskService` off a background
   queue; refreshes on Disk Arbitration events plus a 5s backup timer. Exposes
@@ -70,9 +73,11 @@ Data flows: `diskutil` / Disk Arbitration → `DiskService` → `VolumeStore` �
 - **[SANUnlink/AppDelegate.swift](SANUnlink/AppDelegate.swift)** — the **shutdown/logout guard**.
   `applicationShouldTerminate` unmounts/ejects all FC volumes via `.terminateLater` + a hard
   timeout, then replies. **Crucially it only fires for a genuine system logout / restart /
-  shutdown** — it inspects the terminating Apple Event's `kAEQuitReason`; a manual "Quit" returns
-  `.terminateNow` and never touches the (often production) mounted volumes. Also observes
-  `NSWorkspace.willPowerOffNotification`.
+  shutdown** — it treats the *presence* of a `kAEQuitReason` on the terminating Apple Event as a
+  power event (biasing toward running the guard even on an unrecognised reason code), while a
+  manual "Quit" — which carries no reason — returns `.terminateNow` and never touches the (often
+  production) mounted volumes. `NSWorkspace.willPowerOffNotification` is a second, independent
+  trigger for the same unmount.
 - **[SANUnlink/Services/LoginItem.swift](SANUnlink/Services/LoginItem.swift)** — `SMAppService`
   wrapper for the "Launch at login" toggle (required so the guard is running at shutdown).
 - **[SANUnlink/Views/MenuContentView.swift](SANUnlink/Views/MenuContentView.swift)** — the

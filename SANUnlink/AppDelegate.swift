@@ -51,18 +51,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Inspects the Apple Event that triggered termination. macOS sends a `quit`
     /// event carrying a `kAEQuitReason` when the user logs out / restarts / shuts
-    /// down; an ordinary Quit carries no such reason.
+    /// down; an ordinary Quit (⌘Q / menu) carries no such reason.
+    ///
+    /// We treat the **presence** of a quit reason — any value — as a system power
+    /// event, rather than matching a fixed list of reason codes. That biases toward
+    /// running the guard: an unrecognised or future reason code still unmounts (the
+    /// safe outcome for this app), while a manual Quit, which has no reason at all,
+    /// still leaves the (often production) volumes mounted.
     private func isSystemLogoutOrShutdown() -> Bool {
         guard let event = NSAppleEventManager.shared().currentAppleEvent,
               event.eventClass == kCoreEventClass,
-              event.eventID == kAEQuitApplication,
-              let reason = event.attributeDescriptor(forKeyword: AEKeyword(kAEQuitReason))
+              event.eventID == kAEQuitApplication
         else { return false }
 
-        let systemReasons: Set<OSType> = [
-            OSType(kAELogOut), OSType(kAEReallyLogOut), OSType(kAEShowRestartDialog),
-            OSType(kAEShowShutdownDialog), OSType(kAERestart), OSType(kAEShutDown),
-        ]
-        return systemReasons.contains(reason.enumCodeValue)
+        return event.attributeDescriptor(forKeyword: AEKeyword(kAEQuitReason)) != nil
     }
 }

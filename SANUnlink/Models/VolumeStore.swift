@@ -41,13 +41,6 @@ final class VolumeStore: ObservableObject {
 
     var hasMountedVolumes: Bool { disks.contains(where: \.hasMountedVolume) }
 
-    /// A one-line summary of current activity, e.g. "Mounting Transfer…".
-    var statusMessage: String? {
-        guard let op = operations.values.sorted(by: { $0.started < $1.started }).first else { return nil }
-        let more = operations.count > 1 ? " (+\(operations.count - 1) more)" : ""
-        return "\(op.verb) \(op.volumeName)…\(more)"
-    }
-
     func operation(for volumeID: String) -> VolumeOperation? { operations[volumeID] }
 
     init() {

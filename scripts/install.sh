@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Coworker installer for the ad-hoc (non-notarized) build.
+# Installer for the ad-hoc (non-notarized) build.
 #
 # Copies SANUnlink.app into /Applications and clears the Gatekeeper quarantine so
 # it opens without the "unidentified developer" warning. Run from the folder that

@@ -31,8 +31,15 @@ enum DiskService {
 
     // MARK: - Command execution
 
+    /// Default timeout for quick `diskutil` calls (`list`, `info`). Mount/unmount pass
+    /// larger values since Xsan mounts legitimately take ~60s.
+    static let defaultTimeout: TimeInterval = 60
+
+    /// Runs `diskutil` with a hard timeout. If the process outlives `timeout` it is
+    /// SIGTERM'd (then SIGKILL'd shortly after), so a wedged `diskutil` can never
+    /// block the serial work queue — or the shutdown guard — indefinitely.
     @discardableResult
-    static func runDiskutil(_ args: [String]) -> CommandResult {
+    static func runDiskutil(_ args: [String], timeout: TimeInterval = defaultTimeout) -> CommandResult {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: diskutilPath)
         process.arguments = args
@@ -49,10 +56,26 @@ enum DiskService {
                                  stderr: "Failed to launch diskutil: \(error.localizedDescription)")
         }
 
+        // Escalating kill timers; both are cancelled if the process exits on its own.
+        let terminateItem = DispatchWorkItem { if process.isRunning { process.terminate() } }
+        let killItem = DispatchWorkItem {
+            if process.isRunning { kill(process.processIdentifier, SIGKILL) }
+        }
+        let timerQueue = DispatchQueue.global(qos: .utility)
+        timerQueue.asyncAfter(deadline: .now() + timeout, execute: terminateItem)
+        timerQueue.asyncAfter(deadline: .now() + timeout + 5, execute: killItem)
+
+        // Drain stdout as it streams (avoids a full-pipe deadlock), then stderr.
         let outData = outPipe.fileHandleForReading.readDataToEndOfFile()
         let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
+        terminateItem.cancel()
+        killItem.cancel()
 
+        if process.terminationReason == .uncaughtSignal {
+            return CommandResult(status: process.terminationStatus, stdout: outData,
+                                 stderr: "diskutil \(args.first ?? "") timed out after \(Int(timeout))s")
+        }
         return CommandResult(status: process.terminationStatus,
                              stdout: outData,
                              stderr: String(data: errData, encoding: .utf8) ?? "")
@@ -74,6 +97,11 @@ enum DiskService {
     /// Content types that are not user-facing volumes and must never be surfaced
     /// or unmounted individually: the raw Fibre Channel LUNs that back an Xsan volume.
     private static let excludedWholeDiskContent: Set<String> = ["Apple_Xsan_Component"]
+
+    /// Whole-disk `Content` of an assembled Xsan volume (not a raw component LUN).
+    /// Always treated as a mountable volume, even when unmounted reports blank
+    /// filesystem / mount-point / volume-name fields.
+    private static let xsanVolumeContent = "Apple_Xsan"
 
     /// Returns every Fibre Channel disk currently attached, with its mountable volumes.
     ///
@@ -176,10 +204,12 @@ enum DiskService {
         // carries a filesystem (Xsan, or an FC drive formatted without a partition map).
         // Reuses the already-fetched whole-disk info — no extra diskutil call.
         if ids.isEmpty {
+            let content = wholeInfo["Content"] as? String ?? ""
+            let isXsanVolume = content == xsanVolumeContent
             let hasFilesystem = (wholeInfo["FilesystemType"] as? String)?.isEmpty == false
             let hasMountPoint = (wholeInfo["MountPoint"] as? String)?.isEmpty == false
             let hasVolumeName = (wholeInfo["VolumeName"] as? String)?.isEmpty == false
-            if hasFilesystem || hasMountPoint || hasVolumeName {
+            if isXsanVolume || hasFilesystem || hasMountPoint || hasVolumeName {
                 ids.append(wholeID)
             }
         }
@@ -213,16 +243,19 @@ enum DiskService {
 
     // MARK: - Operations
 
+    /// Xsan mounts can legitimately take ~60s, so mount/unmount get a generous cap.
+    private static let mountTimeout: TimeInterval = 180
+
     static func mount(_ volume: FCVolume) throws {
-        let result = runDiskutil(["mount", volume.id])
+        let result = runDiskutil(["mount", volume.id], timeout: mountTimeout)
         try check(result, action: "mount \(volume.name)")
     }
 
     /// Unmounts a single volume, retrying with `force` when the volume is busy.
     static func unmount(_ volume: FCVolume) throws {
-        var result = runDiskutil(["unmount", volume.id])
+        var result = runDiskutil(["unmount", volume.id], timeout: mountTimeout)
         if !result.succeeded {
-            result = runDiskutil(["unmount", "force", volume.id])
+            result = runDiskutil(["unmount", "force", volume.id], timeout: mountTimeout)
         }
         try check(result, action: "unmount \(volume.name)")
     }
@@ -231,15 +264,15 @@ enum DiskService {
     /// ejects it when the hardware supports ejection. Xsan volumes are not ejectable,
     /// so for them unmounting is the complete and correct safe-disconnect action.
     static func eject(_ disk: FCDisk) throws {
-        var result = runDiskutil(["unmountDisk", disk.id])
+        var result = runDiskutil(["unmountDisk", disk.id], timeout: mountTimeout)
         if !result.succeeded {
-            result = runDiskutil(["unmountDisk", "force", disk.id])
+            result = runDiskutil(["unmountDisk", "force", disk.id], timeout: mountTimeout)
         }
         try check(result, action: "unmount \(disk.mediaName)")
 
         guard disk.isEjectable else { return }
 
-        let ejectResult = runDiskutil(["eject", disk.id])
+        let ejectResult = runDiskutil(["eject", disk.id], timeout: mountTimeout)
         try check(ejectResult, action: "eject \(disk.mediaName)")
     }
 

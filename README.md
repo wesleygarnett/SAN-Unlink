@@ -1,44 +1,54 @@
 # SAN-Unlink
 
-A macOS menu bar app that safely disconnects SANlink / Fibre Channel (FC) drives.
+A macOS menu bar app that safely disconnects SANlink / Fibre Channel (FC) and Xsan drives.
 
-Disconnecting FC volumes attached via SANlink can freeze macOS, and shutting down or
-logging out while they're still connected can hang the machine. SAN-Unlink lets you unmount
-and eject those drives cleanly with one click — and automatically ejects them on logout /
-shutdown so the Mac never hangs.
+Disconnecting FC volumes attached via SANlink can freeze macOS, and shutting down or logging
+out while they are still connected can hang the machine. SAN-Unlink unmounts and ejects those
+drives cleanly with one click — and automatically unmounts them on logout / shutdown, so the
+Mac never hangs.
 
 ## Features
 
-- **Auto-detects Fibre Channel drives**, including **Xsan** SAN volumes — only FC volumes appear;
-  internal, USB, and SD media (and the raw Xsan component LUNs) are ignored.
+- **Auto-detects Fibre Channel drives**, including **Xsan** SAN volumes — only FC volumes
+  appear; internal, USB, and SD media (and the raw Xsan component LUNs) are ignored.
 - **One-click mount / unmount** per volume, with a **live status** counter while it works, plus
-  context-aware **Mount All** / **Unmount All (safe to disconnect)**.
+  a context-aware **Mount All** / **Unmount All (safe to disconnect)** button.
 - **Shutdown / logout guard** — unmounts all FC volumes before the Mac powers off. It fires
-  *only* on a real logout/restart/shutdown; a manual **Quit** never unmounts your volumes.
+  *only* on a real logout / restart / shutdown; a manual **Quit** never unmounts your volumes.
 - **Launch at login** so the guard is always active.
-- Native menu bar app, no Dock icon.
+- Native menu bar app, no Dock icon. No network access, no root, no privileged helper.
 
 > **Note:** Xsan volume mounts are inherently slow (~60s — that's StorNext, not the app). The
-> app shows a live `Mounting… Ns` status so you can see it's working.
+> app shows a live `Mounting… Ns` status so you can see it is working.
 
 ## Requirements
 
-- macOS 14 (Sonoma) or later, Apple Silicon or Intel.
+- macOS 14 (Sonoma) or later — universal (Apple Silicon or Intel).
 - Xcode 16+ to build from source.
 
-## Install (coworkers)
+## Install
 
-Open `SANUnlink.dmg` and drag **SANUnlink** to Applications.
+Open `SANUnlink.dmg`, then install the app into `/Applications` so it has a stable location
+(this matters — see the note below).
 
-- **Notarized build:** it just opens. Enable *Launch at login* from the menu.
-- **Ad-hoc build (unsigned):** macOS will block it as "unidentified developer." Run the
-  bundled installer from the DMG to clear the quarantine and launch it:
+- **Notarized build:** drag **SANUnlink** to Applications and open it.
+- **Ad-hoc build (unsigned):** macOS Gatekeeper will block it as an "unidentified developer."
+  Run the bundled installer from the mounted DMG, which copies it to `/Applications` and clears
+  the quarantine flag:
 
   ```sh
   ./install.sh
   ```
 
-  (Or right-click the app → **Open** → **Open** the first time.)
+  (Alternatively: drag it to Applications, then right-click → **Open** → **Open** the first
+  time.)
+
+Once it is running, open the menu and enable **Launch at login**.
+
+> **Why /Applications matters:** running the app directly from the DMG or Downloads while it is
+> still quarantined triggers macOS "app translocation" (it runs from a random read-only path).
+> That breaks **Launch at login** and therefore the shutdown guard. Installing to `/Applications`
+> with the quarantine cleared (what `install.sh` does) avoids this.
 
 ## Build from source
 
@@ -47,14 +57,17 @@ Open `SANUnlink.dmg` and drag **SANUnlink** to Applications.
 ./scripts/package.sh    # wrap dist/SANUnlink.app into dist/SANUnlink.dmg
 ```
 
-For a signed + notarized DMG (recommended for sharing), see the header comments in
-[`scripts/package.sh`](scripts/package.sh).
+By default the build is **ad-hoc signed** (no Apple Developer account needed). To produce a
+Developer ID–signed, notarized DMG that opens with no Gatekeeper prompt, set the signing and
+notarization variables — see the header comments in [`scripts/package.sh`](scripts/package.sh).
 
 ## How it works
 
-The app shells out to `/usr/sbin/diskutil` to enumerate disks and mount / unmount / eject
-them, identifying FC devices by their `BusProtocol` (which begins with `Fibre Channel`). Xsan
-volumes are whole-disk `acfs` filesystems and are handled as such; the raw component LUNs are
-hidden. `diskutil` performs the mount/unmount without root. It listens for live attach/detach
-via the Disk Arbitration framework, and hooks `applicationShouldTerminate` (gated to genuine
-logout/shutdown) to run the guard. See [CLAUDE.md](CLAUDE.md) for architecture details.
+The app shells out to `/usr/sbin/diskutil` (via an argument array, never a shell) to enumerate
+disks and mount / unmount / eject them, identifying FC devices by a `BusProtocol` that begins
+with `Fibre Channel`. Xsan volumes are whole-disk `acfs` filesystems and are handled as such;
+the raw component LUNs are hidden. Every `diskutil` call has a hard timeout so a wedged call
+can't hang the app. `diskutil` performs the mount/unmount without root. The app listens for
+live attach/detach via the Disk Arbitration framework, and hooks `applicationShouldTerminate`
+(gated to genuine logout/shutdown) to run the guard. See [CLAUDE.md](CLAUDE.md) for
+architecture details.
