@@ -7,6 +7,9 @@ out while they are still connected can hang the machine. SAN-Unlink unmounts and
 drives cleanly with one click — and automatically unmounts them on logout / shutdown, so the
 Mac never hangs.
 
+**➡️ [Download the latest release](https://github.com/wesleygarnett/SAN-Unlink/releases/latest)**
+(`SANUnlink.dmg`) — then see [Install](#install) below.
+
 ## Features
 
 - **Auto-detects Fibre Channel drives**, including **Xsan** SAN volumes — only FC volumes
