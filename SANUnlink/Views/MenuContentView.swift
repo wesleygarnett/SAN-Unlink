@@ -213,8 +213,18 @@ struct MenuContentView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
             .buttonStyle(.plain)
+
+            Text("SAN-Unlink v\(Self.appVersion)")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
     }
+
+    /// Marketing version from the bundle (CFBundleShortVersionString), so the popover
+    /// always shows exactly which build is running.
+    private static let appVersion: String =
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?"
 }

@@ -124,6 +124,17 @@ enum DiskService {
             return fetched
         }
 
+        // Liveness: `diskutil` keeps listing Xsan *volume* nodes (with full name / size /
+        // acfs filesystem) even after the SAN is physically disconnected — there is no
+        // per-volume "offline" field. The reliable signal is the backing component LUNs:
+        // when the FC cable is pulled they vanish. So if no `Apple_Xsan_Component` LUN is
+        // attached, the Xsan volumes that remain are stale and must not be surfaced.
+        let xsanComponentsPresent = entries.contains { entry in
+            guard let id = entry["DeviceIdentifier"] as? String, let i = info(id) else { return false }
+            return isFibreChannelProtocol(i["BusProtocol"] as? String)
+                && (i["Content"] as? String) == "Apple_Xsan_Component"
+        }
+
         var disks: [FCDisk] = []
 
         for entry in entries {
@@ -135,6 +146,9 @@ enum DiskService {
             // Skip raw Xsan component LUNs early — before any per-volume work.
             let content = wholeInfo["Content"] as? String ?? ""
             if excludedWholeDiskContent.contains(content) { continue }
+
+            // Hide stale Xsan volume nodes left behind after a physical disconnect.
+            if content == xsanVolumeContent && !xsanComponentsPresent { continue }
 
             let volumeIDs = volumeIdentifiers(entry: entry, wholeID: wholeID, wholeInfo: wholeInfo)
             let volumes = volumeIDs.compactMap { id -> FCVolume? in
